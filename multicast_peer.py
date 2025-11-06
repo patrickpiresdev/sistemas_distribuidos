@@ -148,7 +148,7 @@ def listener_thread(sock, local_id, reply=False, debug=False):
 
 def parse_args():
     p = argparse.ArgumentParser(description='Peer multicast P2P (envia e recebe mensagens via multicast)')
-    p.add_argument('--group', default='224.0.0.1', help='Endereço do grupo multicast')
+    p.add_argument('--group', default='239.0.0.1', help='Endereço do grupo multicast')
     p.add_argument('--port', type=int, default=5007, help='Porta UDP')
     p.add_argument('--iface', default=None, help='IP da interface local a usar (opcional)')
     p.add_argument('--name', default=None, help='Nome exibido nas mensagens (padrão: hostname)')
