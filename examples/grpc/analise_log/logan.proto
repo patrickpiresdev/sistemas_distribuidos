@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package logdemo;
+
+message LogRequest {
+  string path = 1;  // caminho do arquivo de log no servidor
+}
+
+message LogEvent {
+  int32 lineno = 1;  // número da linha
+  string level = 2;  // nível inferido
+  string line = 3;   // conteúdo da linha
+}
+
+service LogService {
+  rpc StreamLogs (LogRequest) returns (stream LogEvent);
+}

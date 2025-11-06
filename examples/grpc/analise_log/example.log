@@ -1,0 +1,20 @@
+[INFO] Servidor iniciado
+[INFO] Conexão estabelecida com cliente 192.168.0.10
+[WARN] Latência acima do normal
+[INFO] Requisição recebida em /login
+[ERROR] Falha de autenticação do usuário
+[INFO] Usuário anônimo redirecionado
+[INFO] Nova conexão recebida
+[WARN] Recurso /api/data lento para responder
+[INFO] Resposta enviada ao cliente
+[INFO] Conexão encerrada
+[INFO] Servidor iniciado
+[ERROR] Banco de dados indisponível
+[INFO] Reconexão ao banco em andamento
+[INFO] Reconexão ao banco bem sucedida
+[INFO] Processando requisição de relatório
+[INFO] Relatório gerado com sucesso
+[WARN] Espaço em disco abaixo de 10%
+[INFO] Backup automático iniciado
+[INFO] Backup concluído
+[ERROR] Falha ao enviar email de notificação

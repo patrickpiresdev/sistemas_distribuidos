@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package calc;
+
+// Mensagens
+message BinaryOp {
+  double a = 1;
+  double b = 2;
+}
+
+message Result {
+  double value = 1;
+}
+
+// Serviço com três RPCs unary
+service Calculator {
+  rpc Add (BinaryOp) returns (Result);
+  rpc Mul (BinaryOp) returns (Result);
+  rpc Div (BinaryOp) returns (Result);
+}

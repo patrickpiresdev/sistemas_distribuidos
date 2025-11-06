@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package up;
+
+message UploadChunk {
+  string filename = 1; // nome do arquivo no servidor (enviado toda vez para simplificar)
+  bytes  data     = 2; // bloco de bytes
+}
+
+message UploadStatus {
+  bool  ok             = 1;
+  string message       = 2;
+  int64 bytes_received = 3;
+  string saved_path    = 4; // caminho salvo no servidor
+}
+
+service FileService {
+  // Client streaming: cliente envia vários UploadChunk → servidor responde uma vez com UploadStatus
+  rpc Upload (stream UploadChunk) returns (UploadStatus);
+}
