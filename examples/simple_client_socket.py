@@ -1,11 +1,13 @@
 import socket
 
+conn_info = ('localhost', 65432)
+
 # Cria um socket TCP
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 try:
     # Conecta ao servidor
-    client_socket.connect(('localhost', 65432))
+    client_socket.connect(conn_info)
 
     # Envia uma mensagem
     message = "Olá, servidor!"

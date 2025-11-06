@@ -1,10 +1,12 @@
 import socket
 
+conn_info = ('0.0.0.0', 65432)
+
 # Cria um socket TCP/IP
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 # Liga o socket a um endereço e porta
-server_socket.bind(('localhost', 65432))
+server_socket.bind(conn_info)
 
 # Define o número máximo de conexões em fila
 server_socket.listen(5)
