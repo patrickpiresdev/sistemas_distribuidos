@@ -91,12 +91,13 @@ def make_mcast_socket(bind_port, mcast_group, iface_ip=None, ttl=1, loop=True, d
     return sock
 
 
-def listener_thread(sock, state, reply=False, debug=False):
+def listener_thread(sock, state, debug=False):
     """Listener que também implementa comportamento do coordenador quando state['is_coordinator']==True.
 
     state: dict compartilhado com chaves: is_coordinator (bool), members (dict), next_id (int).
     """
     logger.debug('Listener thread started')
+    group, port = state.get('group'), state.get('port')
     while True:
         try:
             logger.debug('Waiting to receive data...')
@@ -111,6 +112,7 @@ def listener_thread(sock, state, reply=False, debug=False):
         # tentar decodificar JSON
         try:
             obj = json.loads(data.decode('utf-8', errors='replace'))
+            logger.debug('Data decoded as JSON: %s', obj)
         except Exception:
             # não JSON -> exibir como texto bruto
             try:
@@ -118,87 +120,93 @@ def listener_thread(sock, state, reply=False, debug=False):
             except Exception:
                 text = repr(data)
             ts = time.strftime('%H:%M:%S')
-            logger.info(f'[{ts}] {addr[0]}:{addr[1]} -> {text}')
+            # logger.info(f'[{ts}] {addr[0]}:{addr[1]} -> {text}')
+            continue
+
+        if obj.get('to') not in ('all', state.get('id')):
+            if debug:
+                logger.debug('Mensagem não destinada a este peer (to=%s), ignorando', obj.get('to'))
             continue
 
         # protocolo: tratar mensagens administrativas quando houver 'type'
         mtype = obj.get('type')
-        # Se for mensagem administrativa e somos coordenador, tratar
-        if mtype == 'whois':
-            # responder apenas se for coordenador
-            if state.get('is_coordinator'):
-                resp = {'type': 'iam', 'name': state.get('coordinator_name', 'coordinator'), 'ts': time.time()}
-                try:
-                    # responder por multicast para que o solicitante descubra o endereço do coordenador
-                    sock.sendto(json.dumps(resp).encode('utf-8'), (state.get('group'), state.get('port')))
-                    logger.debug('Respondido whois via multicast')
-                except Exception:
-                    logger.exception('Falha ao responder whois')
-            # quemis não são exibidos como chat
+
+        # Ignorar mensagens locais (eco) — campo id das mensagens de chat
+        if mtype != 'chat' and obj.get('id') == state.get('id'):
+            if debug:
+                logger.debug('Ignorando mensagem local (eco)')
+                logger.debug('Id local: %s', state.get('id'))
+                logger.debug('Mensagem ignorada: %s', obj)
             continue
 
-        if mtype == 'iam':
+        # Se for mensagem administrativa e somos coordenador, tratar
+        if mtype == 'whois' and is_coordinator(state):
+            resp = message(sender_id=state['id'], mtype='iam', to=obj.get('id'))
+            try:
+                # responder por multicast para que o solicitante descubra o endereço do coordenador
+                sock.sendto(json.dumps(resp).encode('utf-8'), (group, port))
+                logger.debug('Respondido whois via multicast')
+            except Exception:
+                logger.exception('Falha ao responder whois')
+
+            # whois não são exibidos como chat
+            continue
+
+        if mtype == 'iam': # todo: verificar necessidade pos inclusao do campo 'to' nas mensagens
             # recepção de anúncio de coordenador — ignorar aqui (main já usou discovery)
             continue
 
-        if mtype == 'join_request':
-            if state.get('is_coordinator'):
+        if mtype == 'join_request' and is_coordinator(state):
+            logger.debug('Recebido join_request de %s', addr)
+            if is_coordinator(state):
                 # atribuir id único e responder unicast
                 name = obj.get('name', 'unknown')
-                assigned_id = f'{name}@{addr}' # apenas o 'addr' ja bastava, pois ja eh um identificador unico que a rede resolve para mim, so estou adicionando o nome pelo requisito de atribuição de id para o trabalho
+                logger.debug('Atribuindo id para novo membro: %s', name)
+                ip = addr[0]
+                assigned_id = f'{name}@{ip}' # apenas o 'ip' ja bastava, pois ja eh um identificador unico que a rede resolve para mim, so estou adicionando o nome pelo requisito de atribuição de id para o trabalho
                 if assigned_id in state['members']:
+                    logger.debug('Membro %s já existe, gerando id complementar', assigned_id)
                     complement = uuid.uuid4().hex[:6]
-                    assigned_id = f'{name}_{complement}@{addr}'
-                state['members'].push(assigned_id)
-                ack = {'type': 'join_ack', 'assigned_id': assigned_id, 'ts': time.time()}
+                    assigned_id = f'{name}_{complement}@{ip}'
+                state['members'].append(assigned_id)
+                content = {'assigned_id': assigned_id, 'members': state['members']}
+                ack = message(sender_id=state['id'], mtype='join_ack', to=obj.get('id'), content=content)
 
                 try:
-                    sock.sendto(json.dumps(ack).encode('utf-8'), addr)
+                    logger.debug('Enviando join_ack %s para %s', ack, addr)
+                    sock.sendto(json.dumps(ack).encode('utf-8'), (group, port))
                     logger.info('Atribuído id %s para %s (%s)', assigned_id, obj.get('name'), addr)
                 except Exception:
                     logger.exception('Falha ao enviar join_ack')
             continue
 
-        if mtype == 'join_ack':
+        if mtype == 'join_ack': # todo: verificar necessidade pos inclusao do campo 'to' nas mensagens
             # join_ack recebido — main thread trata de join, aqui apenas ignorar
             continue
 
-        # Ignorar mensagens locais (eco) — campo id das mensagens de chat
-        if obj.get('id') == state.get('id'):
-            if debug:
-                logger.debug('Ignorando mensagem local (eco)')
-            continue
-
-        name = obj.get('name', 'unknown')
-        text = obj.get('text', '')
-        ts = obj.get('ts')
-        stamp = ''
-        if ts:
+        if mtype == 'chat':
             try:
-                stamp = time.strftime('%H:%M:%S', time.localtime(float(ts)))
+                peer_id = obj.get('id')
+                text = obj.get('content', {}).get('text', '')
+                ts = obj.get('ts')
+                stamp = ''
+                if ts:
+                    try:
+                        stamp = time.strftime('%H:%M:%S', time.localtime(float(ts)))
+                    except Exception:
+                        stamp = str(ts)
+                logger.info(f'[{stamp}] {peer_id}: {text}')
             except Exception:
-                stamp = str(ts)
-        logger.info(f'[{stamp}] {name}@{addr[0]}:{addr[1]}: {text}')
-
-        if reply:
-            resp = json.dumps({'id': uuid.uuid4().hex, 'name': 'peer-reply', 'text': f'Echo: {text}', 'ts': time.time()}).encode('utf-8')
-            try:
-                sock.sendto(resp, addr)
-                if debug:
-                    logger.debug(f'Resposta enviada para {addr}')
-            except Exception as e:
-                if debug:
-                    logger.exception('Falha ao enviar resposta: %s', e)
+                logger.exception('Erro ao processar mensagem recebida: %s', obj)
+                continue
 
 
 def parse_args():
     p = argparse.ArgumentParser(description='Peer multicast P2P (envia e recebe mensagens via multicast)')
     p.add_argument('--group', default='239.0.0.1', help='Endereço do grupo multicast')
     p.add_argument('--port', type=int, default=5007, help='Porta UDP')
-    p.add_argument('--iface', default=None, help='IP da interface local a usar (opcional)')
     p.add_argument('--name', default=None, help='Nome exibido nas mensagens (padrão: hostname)')
     p.add_argument('--ttl', type=int, default=1, help='TTL do multicast')
-    p.add_argument('--reply', action='store_true', help='Responder (unicast) às mensagens recebidas')
     p.add_argument('--loop', action='store_true', help='Permitir receber as próprias mensagens (útil para testes locais)')
     p.add_argument('--debug', action='store_true', help='Modo debug (logs adicionais)')
     p.add_argument('--logfile', default='multicast_peer.log', help='Arquivo para gravar logs (padrão: multicast_peer.log)')
@@ -210,14 +218,40 @@ def is_coordinator(state):
     return state.get('id') == state.get('coordinator_id')
 
 
+def wait_reply(sock, reply_type='all', reply_from='all', reply_to='all', timeout=2.0):
+    while True:
+        sock.settimeout(timeout)
+        try:
+            data, addr = sock.recvfrom(65536)
+            obj = json.loads(data.decode('utf-8', errors='replace'))
+            logger.debug('Dados recebidos de %s: %s', addr, obj)
+            if reply_type != 'all' and obj['type'] != reply_type:
+                logger.debug('Tipo de mensagem %s não corresponde ao esperado %s, ignorando', obj['type'], reply_type)
+                continue
+            if reply_from != 'all' and obj.get('id') != reply_from:
+                logger.debug('Mensagem de %s não corresponde ao esperado %s, ignorando', addr[0], reply_from)
+                continue
+            if reply_to != 'all' and obj.get('to') != reply_to:
+                logger.debug('Mensagem para id %s não corresponde ao esperado %s, ignorando', obj.get('id'), reply_to)
+                continue
+            return obj, addr
+        except socket.timeout:
+            return None
+        finally:
+            sock.settimeout(None)
+
+
+def message(sender_id, mtype, to='all', content=None):
+    return {'id': sender_id, 'to': to, 'type': mtype, 'content': content, 'ts': time.time()}
+
+
 def main():
     args = parse_args()
     group = args.group
     port = args.port
-    iface_ip = args.iface or get_default_interface_ip() or '0.0.0.0'
+    iface_ip = get_default_interface_ip() or '0.0.0.0'
     name = args.name or socket.gethostname()
     ttl = args.ttl
-    reply = args.reply
     loop = args.loop
     debug = args.debug
 
@@ -243,36 +277,43 @@ def main():
         sys.exit(1)
 
     # Shared state for coordinator logic
-    state = {'id': None, 'members': [], 'group': group, 'port': port, 'coordinator_id': None}
+    temp_id = uuid.uuid4().hex
+    state = {'id': temp_id, 'members': [], 'group': group, 'port': port, 'coordinator_id': None}
+    logger.debug('Estado inicial: %s', state)
 
     # DISCOVERY: procurar coordenador enviando whois e aguardando iam
     join_timeout = getattr(args, 'join_timeout', 2.0)
     sock.settimeout(join_timeout)
     coordinator_addr = None
     try:
-        whois = {'type': 'whois', 'name': name, 'ts': time.time()}
+        logger.info('Iniciando entrada na rede...')
+        logger.info('Procurando coordenador no grupo %s:%d...', group, port)
+        whois = message(sender_id=state['id'], mtype='whois')
         # enviar whois algumas vezes para aumentar chance de receber
         for _ in range(3):
             try:
                 sock.sendto(json.dumps(whois).encode('utf-8'), (group, port))
+                logger.debug('Enviado whois para %s:%d', group, port)
             except Exception:
                 logger.exception('Falha ao enviar whois')
 
             try:
-                data, addr = sock.recvfrom(65536)
+                logger.debug('Aguardando iam do coordenador...')
+                reply = wait_reply(sock, reply_type='iam', reply_to=state['id'])
+
+                if reply is None:
+                    logger.debug('Timeout aguardando iam')
+                    continue
+
+                obj, addr = reply
+                logger.debug('Dados recebidos de %s:%d', *addr)
             except socket.timeout:
                 continue
 
-            try:
-                obj = json.loads(data.decode('utf-8', errors='replace'))
-            except Exception:
-                continue
-
-            if obj.get('type') == 'iam':
-                coordinator_addr = addr
-                state['coordinator_id'] = obj.get('id')
-                logger.info('Coordenador detectado em %s', coordinator_addr)
-                break
+            coordinator_addr = addr
+            state['coordinator_id'] = obj.get('id')
+            logger.info('Coordenador %s detectado em %s', state['coordinator_id'], coordinator_addr)
+            break
     finally:
         sock.settimeout(None)
 
@@ -286,53 +327,56 @@ def main():
 
     # Se não for coordenador, enviar join_request e aguardar join_ack
     if not is_coordinator(state):
-        join_req = {'type': 'join_request', 'name': name, 'ts': time.time()}
+        join_req = {'type': 'join_request', 'id': state['id'], 'ts': time.time()}
+        join_req = message(sender_id=state['id'], mtype='join_request', to=state['coordinator_id'])
         tries = 3
-        assigned = None
+
+        old_id = state['id']
         for attempt in range(tries):
             try:
-                sock.sendto(json.dumps(join_req).encode('utf-8'), coordinator_addr)
+                sock.sendto(json.dumps(join_req).encode('utf-8'), (group, port))
                 logger.debug('Enviado join_request para %s', coordinator_addr)
             except Exception:
                 logger.exception('Falha ao enviar join_request')
 
             sock.settimeout(join_timeout)
-            try:
-                data, addr = sock.recvfrom(65536)
-            except socket.timeout:
-                logger.debug('Timeout aguardando join_ack (attempt %d)', attempt+1)
-                continue
-            finally:
-                sock.settimeout(None)
-
-            try:
-                obj = json.loads(data.decode('utf-8', errors='replace'))
-            except Exception:
+            logger.debug('Aguardando join_ack...')
+            reply = wait_reply(sock, reply_type='join_ack', reply_to=state['id'])
+            
+            if reply is None:
+                logger.debug('Timeout aguardando join_ack (tentativa %d/%d)', attempt + 1, tries)
                 continue
 
-            if obj.get('type') == 'join_ack' and obj.get('assigned_id'):
-                state['id'] = obj.get('assigned_id')
-                logger.info('Recebido join_ack com id %s', state['id'])
-                break
+            obj, addr = reply
+            logger.debug('Dados recebidos de %s', addr)
+            logger.debug('Dados recebidos: %s', obj)
 
-        if state['id'] is None:
-            logger.error('Não foi possível obter id do coordenador — saindo')
+            content = obj.get('content', {})
+            state['id'] = content.get('assigned_id', old_id)
+            state['members'] = content.get('members', [])
+            logger.debug('Recebido join_ack com id %s', state['id'])
+            break
+
+        if state['id'] == old_id:
+            logger.error('Não foi possível entrar na rede')
             sys.exit(1)
 
-        logger.info('ID local definido como %s', state['id'])
+        logger.info('entrada na rede concluída com id %s', state['id'])
 
     # Start listener thread (após discovery/join)
-    t = threading.Thread(target=listener_thread, args=(sock, state, reply, debug), daemon=True)
+    t = threading.Thread(target=listener_thread, args=(sock, state, debug), daemon=True)
     t.start()
 
-    dest = (group, port)
+    logger.info('coordinator: %s', state['coordinator_id'])
+    logger.info('id: %s', state['id'])
+    logger.info('membros: %s', ', '.join(state['members']))
 
     def send_text(text):
         logger.debug('sending text: %s', text)
-        msg = {'type': 'chat', 'id': state['id'], 'name': name, 'text': text, 'ts': time.time()}
+        msg = message(sender_id=state['id'], mtype='chat', content={'text': text})
         b = json.dumps(msg).encode('utf-8')
         try:
-            sock.sendto(b, dest)
+            sock.sendto(b, (group, port))
             logger.debug('message sent')
         except Exception as e:
             logger.exception('Erro ao enviar mensagem: %s', e)
@@ -352,7 +396,7 @@ def main():
         try:
             # tentar dropar membership
             group_bin = socket.inet_aton(group)
-            iface_bin = socket.inet_aton(iface or '0.0.0.0')
+            iface_bin = socket.inet_aton(iface_ip or '0.0.0.0')
             mreq = struct.pack('4s4s', group_bin, iface_bin)
             try:
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
