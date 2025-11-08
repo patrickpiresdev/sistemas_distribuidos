@@ -160,14 +160,14 @@ def listener_thread(sock, state, debug=False):
             logger.debug('Recebido join_request de %s', addr)
             if is_coordinator(state):
                 # atribuir id único e responder unicast
-                name = obj.get('name', 'unknown')
-                logger.debug('Atribuindo id para novo membro: %s', name)
+                new_member_id = obj.get('id')
+                logger.debug('Atribuindo id para novo membro: %s', new_member_id)
                 ip = addr[0]
-                assigned_id = f'{name}@{ip}' # apenas o 'ip' ja bastava, pois ja eh um identificador unico que a rede resolve para mim, so estou adicionando o nome pelo requisito de atribuição de id para o trabalho
+                assigned_id = f'{new_member_id}@{ip}' # apenas o 'ip' ja bastava, pois ja eh um identificador unico que a rede resolve para mim, so estou adicionando o nome pelo requisito de atribuição de id para o trabalho
                 if assigned_id in state['members']:
                     logger.debug('Membro %s já existe, gerando id complementar', assigned_id)
                     complement = uuid.uuid4().hex[:6]
-                    assigned_id = f'{name}_{complement}@{ip}'
+                    assigned_id = f'{new_member_id}_{complement}@{ip}'
                 state['members'].append(assigned_id)
                 content = {'assigned_id': assigned_id, 'members': state['members']}
                 ack = message(sender_id=state['id'], mtype='join_ack', to=obj.get('id'), content=content)
@@ -175,13 +175,29 @@ def listener_thread(sock, state, debug=False):
                 try:
                     logger.debug('Enviando join_ack %s para %s', ack, addr)
                     sock.sendto(json.dumps(ack).encode('utf-8'), (group, port))
-                    logger.info('Atribuído id %s para %s (%s)', assigned_id, obj.get('name'), addr)
+                    logger.info('Atribuído id %s para %s (%s)', assigned_id, obj.get('id'), addr)
                 except Exception:
                     logger.exception('Falha ao enviar join_ack')
+
+                for m in state['members']: # let all members know about the new member
+                    if m != assigned_id:
+                        notify = message(sender_id=state['id'], mtype='new_member', to=m, content={'new_member_id': assigned_id})
+                        try:
+                            sock.sendto(json.dumps(notify).encode('utf-8'), (group, port))
+                            logger.debug('Notificado membro %s sobre novo membro %s', m, assigned_id)
+                        except Exception:
+                            logger.exception('Falha ao notificar membro %s sobre novo membro %s', m, assigned_id)
             continue
 
         if mtype == 'join_ack': # todo: verificar necessidade pos inclusao do campo 'to' nas mensagens
             # join_ack recebido — main thread trata de join, aqui apenas ignorar
+            continue
+
+        if mtype == 'new_member':
+            new_member_id = obj.get('content', {}).get('new_member_id')
+            if new_member_id and new_member_id not in state['members']:
+                state['members'].append(new_member_id)
+                logger.info('Novo membro adicionado: %s', new_member_id)
             continue
 
         if mtype == 'chat':
@@ -274,7 +290,7 @@ def main():
 
     with make_mcast_socket(port, group, iface_ip=iface_ip, ttl=ttl, loop=loop, debug=debug) as sock:
         # State for coordinator logic
-        state = build_state(group, port)
+        state = build_state(group, port, name)
 
         # DISCOVERY: procurar coordenador enviando whois e aguardando iam
         state['coordinator_id'] = get_coordinator(sock, state)
@@ -294,15 +310,19 @@ def main():
         while True:
             try:
                 text = input('>>> ')
+                if text == '\\state':
+                    logger.info('Estado atual:')
+                    for k, v in state.items():
+                        logger.info('  %s: %s', k, v)
+                    continue
                 logger.debug('sending: %s', text)
                 send_text(sock, state, text)
             except (EOFError, KeyboardInterrupt):
                 logger.info('\nSaindo...')
                 break
 
-def build_state(group, port):
-    temp_id = uuid.uuid4().hex
-    return {'id': temp_id, 'members': [], 'group': group, 'port': port, 'coordinator_id': None}
+def build_state(group, port, name):
+    return {'id': name, 'members': [], 'group': group, 'port': port, 'coordinator_id': None}
 
 
 def connect_to_chat(sock, state, join_timeout):
