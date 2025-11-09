@@ -9,7 +9,7 @@ This is a simple multicast chat application implemented in Python. It allows mul
     - [X] assign unique IDs to new members
     - [X] notify all members of new additions
     - [X] send heartbeats to inform that coordinator is alive and send updated state in case some information was missed along the way (because of packet loss in UDP)
-    - [ ] notify members when someone leaves the group
+    - [X] notify members when someone leaves the group
     - [ ] identify coordinator failure based on missing heartbeats
     - [ ] enter election process when coordinator failure is detected
     - [ ] implement election algorithm to choose new coordinator in case the current one goes down: bully or ring

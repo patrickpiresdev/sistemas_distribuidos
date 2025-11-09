@@ -114,13 +114,6 @@ def listener_thread(sock, state, debug=False):
             obj = json.loads(data.decode('utf-8', errors='replace'))
             logger.debug('Data decoded as JSON: %s', obj)
         except Exception:
-            # não JSON -> exibir como texto bruto
-            try:
-                text = data.decode('utf-8')
-            except Exception:
-                text = repr(data)
-            ts = time.strftime('%H:%M:%S')
-            # logger.info(f'[{ts}] {addr[0]}:{addr[1]} -> {text}')
             continue
 
         if obj.get('to') not in ('all', state.get('id')):
@@ -164,11 +157,11 @@ def listener_thread(sock, state, debug=False):
                 logger.debug('Atribuindo id para novo membro: %s', new_member_id)
                 ip = addr[0]
                 assigned_id = f'{new_member_id}@{ip}' # apenas o 'ip' ja bastava, pois ja eh um identificador unico que a rede resolve para mim, so estou adicionando o nome pelo requisito de atribuição de id para o trabalho
-                if assigned_id in state['members']:
+                if assigned_id in state['members'].keys():
                     logger.debug('Membro %s já existe, gerando id complementar', assigned_id)
                     complement = uuid.uuid4().hex[:6]
                     assigned_id = f'{new_member_id}_{complement}@{ip}'
-                state['members'].append(assigned_id)
+                state['members'][assigned_id] = time.time()
                 content = {'assigned_id': assigned_id, 'members': state['members'], 'last_heartbeat': time.time()}
                 ack = message(sender_id=state['id'], mtype='join_ack', to=obj.get('id'), content=content)
 
@@ -179,7 +172,7 @@ def listener_thread(sock, state, debug=False):
                 except Exception:
                     logger.exception('Falha ao enviar join_ack')
 
-                for m in state['members']: # let all members know about the new member
+                for m in state['members'].keys(): # let all members know about the new member
                     if m != assigned_id:
                         notify = message(sender_id=state['id'], mtype='new_member', to=m, content={'new_member_id': assigned_id})
                         try:
@@ -193,21 +186,46 @@ def listener_thread(sock, state, debug=False):
             # join_ack recebido — main thread trata de join, aqui apenas ignorar
             continue
 
+        if obj['id'] not in state['members'].keys():
+            logger.debug('Remetente %s não é membro conhecido, ignorando', obj['id'])
+            continue
+
         if mtype == 'new_member':
             new_member_id = obj.get('content', {}).get('new_member_id')
-            if new_member_id and new_member_id not in state['members']:
-                state['members'].append(new_member_id)
+            if new_member_id and new_member_id not in state['members'].keys():
+                state['members'][new_member_id] = time.time()
                 logger.info('Novo membro adicionado: %s', new_member_id)
             continue
 
         if mtype == 'heartbeat' and not is_coordinator(state):
             # atualizar lista de membros a partir do heartbeat do coordenador
-            state['members']        = obj['content']['members']
+            cur_members = set(state['members'].keys())
+            incoming_members = set(obj['content']['members'].keys())
+            absent_members = cur_members - incoming_members
+
+            for am in absent_members:
+                del state['members'][am]
+                logger.info('Membro removido por ausência (segundo heartbeat): %s', am)            
             state['last_heartbeat'] = time.time()
+
+            # send back ack to coordinator
+            ack = message(sender_id=state['id'], mtype='heartbeat_ack', to=state['coordinator_id'])
+            try:
+                sock.sendto(json.dumps(ack).encode('utf-8'), (group, port))
+                logger.debug('Respondido heartbeat_ack para o coordenador')
+            except Exception:
+                logger.exception('Falha ao enviar heartbeat_ack')
 
             if debug:
                 logger.debug('Heartbeat recebido do coordenador, membros atualizados: %s', state['members'])
 
+            continue
+
+        if mtype == 'heartbeat_ack' and is_coordinator(state):
+            # coordenador recebeu ack de heartbeat — pode usar para monitorar membros ativos
+            state['members'][obj.get('id')] = time.time()
+            if debug:
+                logger.debug('Recebido heartbeat_ack de %s', obj.get('id'))
             continue
 
         if mtype == 'chat':
@@ -283,6 +301,21 @@ def send_text(sock, state, text):
         logger.exception('Erro ao enviar mensagem: %s', e)
 
 
+def check_absence(state, threshold):
+    """Verifica membros ausentes com base no último heartbeat."""
+    now = time.time()
+    to_remove = []
+    for member_id, last_hb in state['members'].items():
+        if member_id == state['id']: # is coordinator
+            continue
+
+        if now - last_hb > threshold:
+            to_remove.append(member_id)
+    for member_id in to_remove:
+        del state['members'][member_id]
+        logger.info('Membro removido por ausência: %s', member_id)
+
+
 def heartbeat(sock, state, debug=False):
     """Envia periodicamente mensagens heartbeat para o grupo multicast."""
     group, port = state.get('group'), state.get('port')
@@ -290,6 +323,7 @@ def heartbeat(sock, state, debug=False):
     logger.debug('Heartbeat thread started')
     while True:
         time.sleep(interval)
+        check_absence(state, interval * 2) # remover membros ausentes
         hb_msg = message(sender_id=state['id'], mtype='heartbeat', content={'members': state['members']})
         try:
             sock.sendto(json.dumps(hb_msg).encode('utf-8'), (group, port))
@@ -322,7 +356,7 @@ def main():
         state['coordinator_id'] = get_coordinator(sock, state)
 
         if state['coordinator_id'] is None: # nenhum coordenador detectado -> assumir coordenação
-            assume_coordination(name, state)
+            assume_coordination(sock, name, state, debug)
 
         # Se não for coordenador, enviar join_request e aguardar join_ack
         if not is_coordinator(state):
@@ -331,10 +365,6 @@ def main():
         # Start listener thread (após discovery/join)
         t = threading.Thread(target=listener_thread, args=(sock, state, debug), daemon=True)
         t.start()
-
-        if is_coordinator(state):
-            t2 = threading.Thread(target=heartbeat, args=(sock, state, debug), daemon=True)
-            t2.start()
 
         logger.info('Digite mensagens e pressione Enter para enviar. Ctrl-C para sair.')
         while True:
@@ -345,7 +375,14 @@ def main():
                     for k, v in state.items():
                         if k == 'last_heartbeat':
                             v = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(v))
-                        logger.info('  %s: %s', k, v)
+                        if k == 'members':
+                            logger.info('  members:')
+                            for mk, mv in v.items():
+                                mv_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mv))
+                                logger.info('    %s: last heartbeat at %s', mk, mv_str)
+                            continue
+                        else:
+                            logger.info('  %s: %s', k, v)
                     continue
                 logger.debug('sending: %s', text)
                 send_text(sock, state, text)
@@ -356,7 +393,7 @@ def main():
 def build_state(group, port, name):
     return {
         'id': name,
-        'members': [],
+        'members': {},
         'group': group,
         'port': port,
         'coordinator_id': None,
@@ -403,12 +440,14 @@ def connect_to_chat(sock, state, join_timeout):
 
     logger.info('entrada na rede concluída com id %s', state['id'])
 
-def assume_coordination(name, state):
+def assume_coordination(sock, name, state, debug):
     local_ip                = socket.gethostbyname(socket.gethostname())
     state['id']             = f'{name}@{local_ip}'
     state['coordinator_id'] = state['id']
     state['status']         = 'chatting'
-    state['members'].append(state['id'])
+    state['members'][state['id']] = time.time()
+    t1 = threading.Thread(target=heartbeat, args=(sock, state, debug), daemon=True)
+    t1.start()
     logger.info('Nenhum coordenador encontrado — assumindo coordenação (id=%s)', state['coordinator_id'])
 
 def get_coordinator(sock, state):
